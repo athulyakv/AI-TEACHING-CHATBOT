@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AI Teaching Assistant</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/style.css">
+  <!-- Markdown renderer -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <div class="chat-wrapper">
+    <header>
+      <h1>AI Teaching Assistant</h1>
+      <p class="subtitle">Ask course questions, upload notes (PDF/TXT), and get grounded, step-by-step answers.</p>
+
+      <div class="top-controls">
+        <label class="toggle">
+          <input type="checkbox" id="dark-toggle">
+          <span>Dark mode</span>
+        </label>
+
+        <label>
+          Model:
+          <select id="model-select">
+            <option value="gemini-1.5-flash">gemini-1.5-flash (fast)</option>
+            <option value="gemini-1.5-pro">gemini-1.5-pro (better reasoning)</option>
+          </select>
+        </label>
+
+        <label class="toggle">
+          <input type="checkbox" id="stream-toggle" checked>
+          <span>Stream replies</span>
+        </label>
+
+        <button id="clear-chat" title="Clear conversation">Clear</button>
+      </div>
+    </header>
+
+    <main id="chat-box"></main>
+
+    <div class="controls">
+      <div id="dropzone" class="dropzone">
+        <input id="file-input" type="file" />
+        <button id="upload-btn">Upload Notes</button>
+        <span id="upload-status" class="upload-status"></span>
+      </div>
+
+      <div class="input-row">
+        <input id="user-input" placeholder="Ask a question about your course..." />
+        <button id="send-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const chatBox = document.getElementById("chat-box");
+const userInput = document.getElementById("user-input");
+const sendBtn = document.getElementById("send-btn");
+const uploadBtn = document.getElementById("upload-btn");
+const fileInput = document.getElementById("file-input");
+const uploadStatus = document.getElementById("upload-status");
+const darkToggle = document.getElementById("dark-toggle");
+const streamToggle = document.getElementById("stream-toggle");
+const modelSelect = document.getElementById("model-select");
+const clearBtn = document.getElementById("clear-chat");
+const dropzone = document.getElementById("dropzone");
+
+const LS_KEY = "ai-ta-chat-history-v1";
+const LS_THEME = "ai-ta-theme";
+
+function applyTheme(theme) {
+  if (theme === "dark") document.body.classList.add("dark");
+  else document.body.classList.remove("dark");
+}
+function loadTheme() {
+  const t = localStorage.getItem(LS_THEME) || "light";
+  applyTheme(t);
+  darkToggle.checked = t === "dark";
+}
+darkToggle.addEventListener("change", () => {
+  const t = darkToggle.checked ? "dark" : "light";
+  localStorage.setItem(LS_THEME, t);
+  applyTheme(t);
+});
+loadTheme();
+
+// Chat persistence
+function saveHistory() {
+  const items = Array.from(chatBox.querySelectorAll(".msg"))
+    .map(el => ({cls: el.className, html: el.innerHTML}));
+  localStorage.setItem(LS_KEY, JSON.stringify(items));
+}
+function loadHistory() {
+  const raw = localStorage.getItem(LS_KEY);
+  if (!raw) return;
+  try {
+    const arr = JSON.parse(raw);
+    arr.forEach(({cls, html}) => {
+      const d = document.createElement("div");
+      d.className = cls;
+      d.innerHTML = html;
+      chatBox.appendChild(d);
+    });
+    chatBox.scrollTop = chatBox.scrollHeight;
+  } catch {}
+}
+loadHistory();
+
+function appendMarkdown(md, cls) {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.innerHTML = marked.parse(md);
+  chatBox.appendChild(d);
+  chatBox.scrollTop = chatBox.scrollHeight;
+  saveHistory();
+  return d;
+}
+
+function appendRaw(html, cls) {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.innerHTML = html;
+  chatBox.appendChild(d);
+  chatBox.scrollTop = chatBox.scrollHeight;
+  saveHistory();
+  return d;
+}
+
+sendBtn.addEventListener("click", sendMessage);
+userInput.addEventListener("keydown", (e) => { if(e.key === "Enter") sendMessage(); });
+clearBtn.addEventListener("click", () => {
+  chatBox.innerHTML = "";
+  saveHistory();
+});
+
+async function sendMessage(){
+  const msg = userInput.value.trim();
+  if(!msg) return;
+
+  appendRaw(`<strong>You:</strong> ${msg}`, "msg user");
+  userInput.value = "";
+
+  const model = modelSelect.value;
+  const useStream = streamToggle.checked;
+
+  const bubble = appendMarkdown("_Assistant is typing…_", "msg bot");
+
+  try {
+    if (useStream) {
+      await streamReply(msg, model, bubble);
+    } else {
+      await fetchReply(msg, model, bubble);
+    }
+  } catch (err) {
+    bubble.innerHTML = `<strong>Error:</strong> ${err}`;
+  } finally {
+    saveHistory();
+  }
+}
+
+async function fetchReply(msg, model, bubble){
+  const res = await fetch("/chat", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({message: msg, model})
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    bubble.innerHTML = `<strong>Error:</strong> ${data.answer || "Unknown error"}`;
+    return;
+  }
+  bubble.innerHTML = marked.parse(data.answer || "");
+  if (data.sources?.length) {
+    const meta = document.createElement("div");
+    meta.className = "msg meta";
+    meta.textContent = `Sources: ${data.sources.join(", ")}`;
+    chatBox.appendChild(meta);
+  }
+}
+
+async function streamReply(msg, model, bubble){
+  const res = await fetch("/chat_stream", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({message: msg, model})
+  });
+
+  if (!res.ok || !res.body) {
+    bubble.innerHTML = `<strong>Error:</strong> ${res.status} ${res.statusText}`;
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let fullText = "";
+
+  while (true) {
+    const {value, done} = await reader.read();
+    if (done) break;
+    fullText += decoder.decode(value, {stream: true});
+    // Re-render incrementally as Markdown
+    bubble.innerHTML = marked.parse(fullText);
+    chatBox.scrollTop = chatBox.scrollHeight;
+  }
+}
+
+// Upload (button)
+uploadBtn.addEventListener("click", async () => {
+  const file = fileInput.files[0];
+  if(!file) { alert("Choose a PDF or .txt file first."); return; }
+  await uploadFile(file);
+});
+
+// Drag & drop
+;["dragenter","dragover"].forEach(evt => dropzone.addEventListener(evt, e => {
+  e.preventDefault(); e.stopPropagation(); dropzone.classList.add("drag");
+}));
+;["dragleave","drop"].forEach(evt => dropzone.addEventListener(evt, e => {
+  e.preventDefault(); e.stopPropagation(); dropzone.classList.remove("drag");
+}));
+dropzone.addEventListener("drop", async (e) => {
+  const file = e.dataTransfer.files?.[0];
+  if (file) await uploadFile(file);
+});
+
+async function uploadFile(file){
+  const fd = new FormData();
+  fd.append("file", file);
+  uploadStatus.textContent = `Uploading ${file.name}…`;
+  try {
+    const res = await fetch("/upload", { method: "POST", body: fd });
+    const data = await res.json();
+    if(data.ok){
+      uploadStatus.textContent = `Uploaded ${data.filename}. Index rebuilt.`;
+      appendRaw(`<small>Uploaded ${data.filename} and re-indexed notes.</small>`, "msg meta");
+    } else {
+      uploadStatus.textContent = `Error: ${data.error}`;
+      appendRaw(`<small>Error uploading: ${data.error}</small>`, "msg meta");
+    }
+  } catch(err){
+    uploadStatus.textContent = `Error: ${err}`;
+    appendRaw(`<small>Error uploading: ${err}</small>`, "msg meta");
+  } finally {
+    setTimeout(()=> uploadStatus.textContent="", 4000);
+  }
+}
+</script>
+</body>
+</html>
