@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AI Teaching Assistant</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="chat-wrapper">
+    <header>
+      <h1>AI Teaching Assistant</h1>
+      <p class="subtitle">Ask course questions, upload notes, get step-by-step answers.</p>
+    </header>
+
+    <main id="chat-box"></main>
+
+    <div class="controls">
+      <input id="file-input" type="file" />
+      <button id="upload-btn">Upload Notes</button>
+      <div class="input-row">
+        <input id="user-input" placeholder="Ask a question..." />
+        <button id="send-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const chatBox = document.getElementById("chat-box");
+const userInput = document.getElementById("user-input");
+const sendBtn = document.getElementById("send-btn");
+const uploadBtn = document.getElementById("upload-btn");
+const fileInput = document.getElementById("file-input");
+
+function appendMessage(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.innerHTML = text;
+  chatBox.appendChild(d);
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+sendBtn.addEventListener("click", sendMessage);
+userInput.addEventListener("keydown", (e) => { if(e.key === "Enter") sendMessage(); });
+
+async function sendMessage(){
+  const msg = userInput.value.trim();
+  if(!msg) return;
+  appendMessage(`<strong>You:</strong> ${msg}`, "msg user");
+  userInput.value = "";
+  appendMessage(`<em>Assistant is typing...</em>`, "msg bot typing");
+  try {
+    const res = await fetch("/chat", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({message: msg})
+    });
+    const data = await res.json();
+    document.querySelectorAll(".typing").forEach(x => x.remove());
+    if(data.ok){
+      appendMessage(`<strong>Assistant:</strong> ${data.answer}`, "msg bot");
+      if(data.sources && data.sources.length) {
+        appendMessage(`<small class="sources">Sources: ${data.sources.join(", ")}</small>`, "msg meta");
+      }
+    } else {
+      appendMessage(`<strong>Error:</strong> ${data.answer}`, "msg bot");
+    }
+  } catch(err){
+    document.querySelectorAll(".typing").forEach(x => x.remove());
+    appendMessage(`<strong>Error:</strong> ${err}`, "msg bot");
+  }
+}
+
+uploadBtn.addEventListener("click", async () => {
+  const file = fileInput.files[0];
+  if(!file) { alert("Choose a file first."); return; }
+  const fd = new FormData();
+  fd.append("file", file);
+  appendMessage(`<small>Uploading ${file.name} ...</small>`, "msg meta");
+  const res = await fetch("/upload", { method: "POST", body: fd });
+  const data = await res.json();
+  if(data.ok){
+    appendMessage(`<small>Uploaded ${data.filename} and re-indexed notes.</small>`, "msg meta");
+  } else {
+    appendMessage(`<small>Error uploading: ${data.error}</small>`, "msg meta");
+  }
+});
+</script>
+</body>
+</html>
